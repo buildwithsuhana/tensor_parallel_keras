@@ -72,8 +72,12 @@ class TensorParallelKeras(keras.Model):
         print("Amit - TensorParallelKeras __init__ called!")
         print("=" * 50)
         
+        # If device_ids were provided, respect them and derive world_size from it
+        if device_ids is not None and len(device_ids) > 0:
+            world_size = len(device_ids) if world_size is None else world_size
+        
         # Auto-detect world_size and device_ids if not provided
-        if world_size is None:
+        if world_size is None and not device_ids:
             world_size, device_ids = self._auto_detect_parallelism()
         elif device_ids is None:
             # Only auto-detect device_ids if world_size is specified
@@ -230,6 +234,22 @@ class TensorParallelKeras(keras.Model):
         # Set the weights on the internal original_model
         self.original_model.set_weights(weights)
         print("🔧 Weights set on original_model. Re-sharding parameters...")
+
+        # Short-circuit for single-device or missing configuration
+        try:
+            if not hasattr(self, 'tensor_parallel_config') or self.tensor_parallel_config is None:
+                # If we're effectively single-device, skip re-sharding entirely
+                if getattr(self, 'world_size', 1) <= 1 or len(getattr(self, 'devices', [])) <= 1:
+                    print("   - Single-device or no sharding config; skipping re-sharding.")
+                    self.model_shards = [self.original_model]
+                    return
+                # Lazily create the tensor parallel config if we do have multiple devices
+                self.tensor_parallel_config = get_default_config_keras(self.original_model, self.devices)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Could not initialize tensor_parallel_config; skipping re-sharding: {e}")
+            self.model_shards = [self.original_model]
+            return
 
         # Re-create collective operations
         config_with_ops = self.tensor_parallel_config.create_collective_ops(self.devices, self.distributed)
